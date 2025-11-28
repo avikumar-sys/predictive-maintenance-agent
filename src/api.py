@@ -1,113 +1,68 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
 import joblib
 import pandas as pd
-from sklearn.preprocessing import StandardScaler
 import os
-import csv
-from datetime import datetime
 
-app = FastAPI(title="Predictive Maintenance API")
+app = FastAPI()
 
-# ✅ Paths
-MODEL_PATH = os.path.join("models", "model.pkl")
-TRAIN_DATA_PATH = os.path.join("data", "processed", "X_train.csv")
-LOG_DIR = "logs"
-LOG_PATH = os.path.join(LOG_DIR, "predictions.csv")
+# ✅ Resolve paths safely for Render
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+MODEL_PATH = os.path.join(BASE_DIR, "models", "model.pkl")
+DATA_PATH = os.path.join(BASE_DIR, "data", "processed", "X_train.csv")
 
-# ✅ Load trained model
-model = joblib.load(MODEL_PATH)
+# ✅ Load model and data
+try:
+    model = joblib.load(MODEL_PATH)
+    X_train = pd.read_csv(DATA_PATH)
+except FileNotFoundError as e:
+    raise RuntimeError(f"Required file missing: {e.filename}")
+except Exception as e:
+    raise RuntimeError(f"Error loading model or data: {str(e)}")
 
-# ✅ Load training data and fit scaler
-train_df = pd.read_csv(TRAIN_DATA_PATH)
-scaler = StandardScaler()
-scaler.fit(train_df)
-
-# ✅ Type encoding map
-type_map = {"L": 0, "M": 1, "H": 2}
-
-# ✅ Ensure logs directory and CSV exist
-os.makedirs(LOG_DIR, exist_ok=True)
-if not os.path.exists(LOG_PATH):
-    with open(LOG_PATH, "w", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow([
-            "timestamp",
-            "type",
-            "air_temperature_K",
-            "process_temperature_K",
-            "rotational_speed_rpm",
-            "torque_Nm",
-            "tool_wear_min",
-            "prediction",
-            "probability"
-        ])
-
+# ✅ Input schema (your model expects 4 sensors)
+class InputData(BaseModel):
+    sensor_1: float
+    sensor_2: float
+    sensor_3: float
+    sensor_4: float
 
 @app.get("/")
-def home():
+def read_root():
     return {"message": "✅ Predictive Maintenance API is running!"}
 
-
 @app.post("/predict")
-def predict(data: dict):
-    """
-    Expected keys in `data`:
-    - "Type" (L/M/H)
-    - "Air temperature [K]"
-    - "Process temperature [K]"
-    - "Rotational speed [rpm]"
-    - "Torque [Nm]"
-    - "Tool wear [min]"
-    """
-
-    # ✅ Convert Type to numeric
-    if "Type" in data:
-        data["Type"] = type_map.get(data["Type"], 0)
-
-    # ✅ Build DataFrame from input
-    df = pd.DataFrame([data])
-
-    # ✅ Enforce same column order as training data
-    expected_cols = train_df.columns.tolist()
-    # This will raise a clear error if a column is missing
+def predict(data: InputData):
     try:
-        df = df[expected_cols]
-    except KeyError as e:
+        # Convert input to DataFrame
+        input_df = pd.DataFrame([data.dict()])
+
+        # ✅ Model prediction (0 or 1)
+        pred = model.predict(input_df)[0]
+
+        # ✅ Probability (if model supports predict_proba)
+        try:
+            prob = float(model.predict_proba(input_df)[0][1])
+        except Exception:
+            prob = 1.0 if pred == 1 else 0.0
+
+        # ✅ Human-readable status
+        status = "⚠️ Failure Predicted" if pred == 1 else "✅ Normal Operation"
+
+        # ✅ Recommended action
+        recommended_action = (
+            "Schedule maintenance within 24 hours."
+            if pred == 1
+            else "Machine is operating normally."
+        )
+
+        # ✅ Final response (matches your Streamlit dashboard)
         return {
-            "error": "Input features do not match training features.",
-            "details": str(e),
-            "expected_columns": expected_cols,
-            "received_columns": df.columns.tolist(),
+            "prediction": int(pred),
+            "probability": round(prob, 3),
+            "status": status,
+            "recommended_action": recommended_action,
         }
 
-    # ✅ Scale input
-    df_scaled = scaler.transform(df)
-
-    # ✅ Predict
-    prediction = model.predict(df_scaled)[0]
-    probability = model.predict_proba(df_scaled)[0][1]
-
-    # ✅ Log the result
-    with open(LOG_PATH, "a", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow([
-            datetime.now().isoformat(timespec="seconds"),
-            data.get("Type"),
-            data.get("Air temperature [K]"),
-            data.get("Process temperature [K]"),
-            data.get("Rotational speed [rpm]"),
-            data.get("Torque [Nm]"),
-            data.get("Tool wear [min]"),
-            int(prediction),
-            float(probability),
-        ])
-
-    # ✅ Response
-    return {
-        "prediction": int(prediction),
-        "probability": float(round(probability, 3)),
-        "status": "⚠️ Failure Risk" if prediction == 1 else "✅ Normal Operation",
-        "recommended_action": (
-            "Schedule immediate inspection." if prediction == 1 else "Continue monitoring."
-        )
-    }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Prediction failed: {str(e)}")
