@@ -4,6 +4,7 @@ import joblib
 import pandas as pd
 import os
 
+# ✅ MUST BE AT THE TOP BEFORE ANY ROUTES
 app = FastAPI()
 
 # ✅ Resolve paths safely for Render
